@@ -164,6 +164,9 @@ RUN set -eux; \
 		--enable-mbstring \
 # --enable-mysqlnd is included here because it's harder to compile after the fact than extensions are (since it's a plugin for several extensions, not an extension in itself)
 		--enable-mysqlnd \
+		--with-pdo-mysql=mysqlnd \
+# https://stackoverflow.com/questions/16217871/enable-bcmath-using-php-ini
+		--enable-bcmath \
 # https://wiki.php.net/rfc/argon2_password_hash (7.2+)
 		--with-password-argon2 \
 # https://wiki.php.net/rfc/libsodium
