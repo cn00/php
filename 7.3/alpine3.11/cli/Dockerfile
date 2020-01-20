@@ -4,40 +4,38 @@
 # PLEASE DO NOT EDIT IT DIRECTLY.
 #
 
-FROM debian:buster-slim
-
-# prevent Debian's PHP packages from being installed
-# https://github.com/docker-library/php/pull/542
-RUN set -eux; \
-	{ \
-		echo 'Package: php*'; \
-		echo 'Pin: release *'; \
-		echo 'Pin-Priority: -1'; \
-	} > /etc/apt/preferences.d/no-debian-php
+FROM alpine:3.11
 
 # dependencies required for running "phpize"
-# (see persistent deps below)
+# these get automatically installed and removed by "docker-php-ext-*" (unless they're already installed)
 ENV PHPIZE_DEPS \
 		autoconf \
-		dpkg-dev \
+		dpkg-dev dpkg \
 		file \
 		g++ \
 		gcc \
 		libc-dev \
 		make \
-		pkg-config \
+		pkgconf \
 		re2c
 
 # persistent / runtime deps
-RUN set -eux; \
-	apt-get update; \
-	apt-get install -y --no-install-recommends \
-		$PHPIZE_DEPS \
+RUN apk add --no-cache \
 		ca-certificates \
 		curl \
-		xz-utils \
-	; \
-	rm -rf /var/lib/apt/lists/*
+		tar \
+		xz \
+# https://github.com/docker-library/php/issues/494
+		openssl
+
+# ensure www-data user exists
+RUN set -eux; \
+	addgroup -g 82 -S www-data; \
+	adduser -u 82 -D -S -G www-data www-data
+# 82 is the standard uid/gid for "www-data" in Alpine
+# https://git.alpinelinux.org/aports/tree/main/apache2/apache2.pre-install?h=3.9-stable
+# https://git.alpinelinux.org/aports/tree/main/lighttpd/lighttpd.pre-install?h=3.9-stable
+# https://git.alpinelinux.org/aports/tree/main/nginx/nginx.pre-install?h=3.9-stable
 
 ENV PHP_INI_DIR /usr/local/etc/php
 RUN set -eux; \
@@ -62,18 +60,15 @@ ENV PHP_CFLAGS="-fstack-protector-strong -fpic -fpie -O2 -D_LARGEFILE_SOURCE -D_
 ENV PHP_CPPFLAGS="$PHP_CFLAGS"
 ENV PHP_LDFLAGS="-Wl,-O1 -Wl,--hash-style=both -pie"
 
-ENV GPG_KEYS 1729F83938DA44E27BA0F4D3DBDB397470D12172 B1B44D8F021E4E2D6021E995DC9FF8D3EE5AF27F
+ENV GPG_KEYS CBAF69F173A0FEA4B537F470D66C9593118BCCB6 F38252826ACD957EF380D39F2F7956BC5DA04B5D
 
-ENV PHP_VERSION 7.2.26
-ENV PHP_URL="https://www.php.net/get/php-7.2.26.tar.xz/from/this/mirror" PHP_ASC_URL="https://www.php.net/get/php-7.2.26.tar.xz.asc/from/this/mirror"
-ENV PHP_SHA256="1dd3bc875e105f5c9d21fb4dc240670bd2c22037820ff03890f5ab883c88b78d" PHP_MD5=""
+ENV PHP_VERSION 7.3.13
+ENV PHP_URL="https://www.php.net/get/php-7.3.13.tar.xz/from/this/mirror" PHP_ASC_URL="https://www.php.net/get/php-7.3.13.tar.xz.asc/from/this/mirror"
+ENV PHP_SHA256="57ac55fe442d2da650abeb9e6fa161bd3a98ba6528c029f076f8bba43dd5c228" PHP_MD5=""
 
 RUN set -eux; \
 	\
-	savedAptMark="$(apt-mark showmanual)"; \
-	apt-get update; \
-	apt-get install -y --no-install-recommends gnupg dirmngr; \
-	rm -rf /var/lib/apt/lists/*; \
+	apk add --no-cache --virtual .fetch-deps gnupg; \
 	\
 	mkdir -p /usr/src; \
 	cd /usr/src; \
@@ -98,42 +93,30 @@ RUN set -eux; \
 		rm -rf "$GNUPGHOME"; \
 	fi; \
 	\
-	apt-mark auto '.*' > /dev/null; \
-	apt-mark manual $savedAptMark > /dev/null; \
-	apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false
+	apk del --no-network .fetch-deps
 
 COPY docker-php-source /usr/local/bin/
 
 RUN set -eux; \
-	\
-	savedAptMark="$(apt-mark showmanual)"; \
-	apt-get update; \
-	apt-get install -y --no-install-recommends \
-		libargon2-dev \
-		libcurl4-openssl-dev \
+	apk add --no-cache --virtual .build-deps \
+		$PHPIZE_DEPS \
+		argon2-dev \
+		coreutils \
+		curl-dev \
 		libedit-dev \
 		libsodium-dev \
-		libsqlite3-dev \
-		libssl-dev \
 		libxml2-dev \
-		zlib1g-dev \
-		${PHP_EXTRA_BUILD_DEPS:-} \
+		openssl-dev \
+		sqlite-dev \
 	; \
-	rm -rf /var/lib/apt/lists/*; \
 	\
-	export \
-		CFLAGS="$PHP_CFLAGS" \
+	export CFLAGS="$PHP_CFLAGS" \
 		CPPFLAGS="$PHP_CPPFLAGS" \
 		LDFLAGS="$PHP_LDFLAGS" \
 	; \
 	docker-php-source extract; \
 	cd /usr/src/php; \
 	gnuArch="$(dpkg-architecture --query DEB_BUILD_GNU_TYPE)"; \
-	debMultiarch="$(dpkg-architecture --query DEB_BUILD_MULTIARCH)"; \
-# https://bugs.php.net/bug.php?id=74125
-	if [ ! -d /usr/include/curl ]; then \
-		ln -sT "/usr/include/$debMultiarch/curl" /usr/local/include/curl; \
-	fi; \
 	./configure \
 		--build="$gnuArch" \
 		--with-config-file-path="$PHP_INI_DIR" \
@@ -166,15 +149,14 @@ RUN set -eux; \
 		\
 # bundled pcre does not support JIT on s390x
 # https://manpages.debian.org/stretch/libpcre3-dev/pcrejit.3.en.html#AVAILABILITY_OF_JIT_SUPPORT
-		$(test "$gnuArch" = 's390x-linux-gnu' && echo '--without-pcre-jit') \
-		--with-libdir="lib/$debMultiarch" \
+		$(test "$gnuArch" = 's390x-linux-musl' && echo '--without-pcre-jit') \
 		\
 		${PHP_EXTRA_CONFIGURE_ARGS:-} \
 	; \
 	make -j "$(nproc)"; \
 	find -type f -name '*.a' -delete; \
 	make install; \
-	find /usr/local/bin /usr/local/sbin -type f -executable -exec strip --strip-all '{}' + || true; \
+	find /usr/local/bin /usr/local/sbin -type f -perm +0111 -exec strip --strip-all '{}' + || true; \
 	make clean; \
 	\
 # https://github.com/docker-library/php/issues/692 (copy default example "php.ini" files somewhere easily discoverable)
@@ -183,18 +165,15 @@ RUN set -eux; \
 	cd /; \
 	docker-php-source delete; \
 	\
-# reset apt-mark's "manual" list so that "purge --auto-remove" will remove all build dependencies
-	apt-mark auto '.*' > /dev/null; \
-	[ -z "$savedAptMark" ] || apt-mark manual $savedAptMark; \
-	find /usr/local -type f -executable -exec ldd '{}' ';' \
-		| awk '/=>/ { print $(NF-1) }' \
-		| sort -u \
-		| xargs -r dpkg-query --search \
-		| cut -d: -f1 \
-		| sort -u \
-		| xargs -r apt-mark manual \
-	; \
-	apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \
+	runDeps="$( \
+		scanelf --needed --nobanner --format '%n#p' --recursive /usr/local \
+			| tr ',' '\n' \
+			| sort -u \
+			| awk 'system("[ -e /usr/local/lib/" $1 " ]") == 0 { next } { print "so:" $1 }' \
+	)"; \
+	apk add --no-cache $runDeps; \
+	\
+	apk del --no-network .build-deps; \
 	\
 # update pecl channel definitions https://github.com/docker-library/php/issues/443
 	pecl update-channels; \
@@ -206,9 +185,6 @@ COPY docker-php-ext-* docker-php-entrypoint /usr/local/bin/
 
 # sodium was built as a shared module (so that it can be replaced later if so desired), so let's enable it too (https://github.com/docker-library/php/issues/598)
 RUN docker-php-ext-enable sodium
-
-# temporary "freetype-config" workaround for https://github.com/docker-library/php/issues/865 (https://bugs.php.net/bug.php?id=76324)
-RUN { echo '#!/bin/sh'; echo 'exec pkg-config "$@" freetype2'; } > /usr/local/bin/freetype-config && chmod +x /usr/local/bin/freetype-config
 
 ENTRYPOINT ["docker-php-entrypoint"]
 ##<autogenerated>##
